@@ -1,4 +1,4 @@
-# Guida al Preprocessing dei Volumi Sani (1mm MNI)
+# Guida al Preprocessing di Volumi NIFTI 
 
 Questo documento descrive i passi necessari per preprocessare i volumi e prepararli per lo skull-stripping e la normalizzazione.
 
