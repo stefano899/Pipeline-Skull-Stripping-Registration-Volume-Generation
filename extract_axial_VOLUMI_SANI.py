@@ -7,19 +7,28 @@ from skimage.transform import resize
 from nibabel.processing import resample_to_output
 import imageio
 from pathlib import Path
+import random
+from datetime import datetime
 
 # ========================================
 # CONFIG
 # ========================================
-tipo = "VOLUMISANI"
 base_root = r"E:\Datasets\Volumi_sani_1mm_MNI"
 
-# 🔹 La cartella train è fuori da VOLUMI-SANI-1mm
-DATASETS_ROOT = r"E:\Datasets"
-GLOBAL_TRAIN_A = os.path.join(DATASETS_ROOT, "train", "trainA")  # T1
-GLOBAL_TRAIN_B = os.path.join(DATASETS_ROOT, "train", "trainB")  # FLAIR
+# 🔹 output globale per il TRAIN (quello che vuoi tu)
+TRAIN_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\trainT1_FLAIR_SANI"
+GLOBAL_TRAIN_A = os.path.join(TRAIN_ROOT, "trainA")  # T1
+GLOBAL_TRAIN_B = os.path.join(TRAIN_ROOT, "trainB")  # FLAIR
+
+# 🔹 output strutturato per il TEST
+TEST_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\test\soggetti"
+
 os.makedirs(GLOBAL_TRAIN_A, exist_ok=True)
 os.makedirs(GLOBAL_TRAIN_B, exist_ok=True)
+os.makedirs(TEST_ROOT, exist_ok=True)
+
+# 🔴 se False non sovrascrive i PNG esistenti
+OVERWRITE = True
 
 # modalità di riferimento per il crop
 ref_modality = "FLAIR"
@@ -29,6 +38,7 @@ nz_threshold = 5000
 resize_shape = (256, 256)
 voxel_sizes = (1, 1, 1)
 
+random.seed(42)
 
 # ========================================
 # DISCOVERY DELLE CARTELLE
@@ -36,9 +46,9 @@ voxel_sizes = (1, 1, 1)
 def discover_subject_anat_pairs(root: str):
     """
     Ritorna tutte le coppie (subj, path_relativo) dove esiste anat/skullstripped.
+    Gestisce sia sub/... che sub/ses-.../...
     """
     root_p = Path(root)
-    # ordiniamo così prendiamo davvero "il primo" sempre nello stesso modo
     for subj in sorted(root_p.iterdir(), key=lambda p: p.name):
         if not subj.is_dir():
             continue
@@ -66,9 +76,6 @@ def discover_subject_anat_pairs(root: str):
 # PATH PER LE MODALITÀ (dentro skullstripped)
 # ========================================
 def path_modality(subject: str, rel_patient: str, modality: str):
-    """
-    Cerca il file NIfTI della modalità dentro skullstripped.
-    """
     folder = os.path.join(base_root, subject, rel_patient)
     if not os.path.isdir(folder):
         return None
@@ -89,7 +96,6 @@ def path_modality(subject: str, rel_patient: str, modality: str):
         if "mask" in f_low:
             continue
 
-        # se il file contiene sia flair che t2: lo trattiamo come flair
         if "flair" in f_low and "t2" in f_low:
             if modality == "FLAIR":
                 return os.path.join(folder, f)
@@ -126,10 +132,25 @@ def load_and_resample(path, is_mask=False):
     order = 0 if is_mask else 1
     resampled_img = resample_to_output(img, voxel_sizes=voxel_sizes, order=order)
     data = resampled_img.get_fdata()
+
     data[data < 0] = 0
-    if not is_mask:
-        dmin, dmax = np.nanmin(data), np.nanmax(data)
-        data = (data - dmin) / (dmax - dmin) if dmax > dmin else np.zeros_like(data)
+
+    if is_mask:
+        return data
+
+    mean = np.mean(data)
+    std = np.std(data)
+    if std > 0:
+        data = (data - mean) / std
+    else:
+        data = np.zeros_like(data)
+
+    dmin, dmax = np.nanmin(data), np.nanmax(data)
+    if dmax > dmin:
+        data = (data - dmin) / (dmax - dmin)
+    else:
+        data = np.zeros_like(data)
+
     return data
 
 
@@ -169,24 +190,50 @@ def compute_crop_and_valid_slices(ref_vol, orientation, nz_threshold, resize_sha
     return (ymin, xmin, ymax, xmax), valid_indices
 
 
+def build_slice_name(subject, rel_patient, modality, slice_idx, ext=".png"):
+    session = None
+    parts = rel_patient.replace("\\", "/").split("/")
+    for p in parts:
+        if p.lower().startswith("ses-"):
+            session = p
+            break
+
+    modality = modality.upper()
+
+    if session:
+        return f"{subject}_{session}_{modality}_slice_{slice_idx:03d}{ext}"
+    else:
+        return f"{subject}_{modality}_slice_{slice_idx:03d}{ext}"
+
+
+def save_png_respecting_overwrite(img_array_uint8, dst_folder, filename):
+    os.makedirs(dst_folder, exist_ok=True)
+    out_path = os.path.join(dst_folder, filename)
+
+    if OVERWRITE:
+        imageio.imwrite(out_path, img_array_uint8)
+        return
+
+    if not os.path.exists(out_path):
+        imageio.imwrite(out_path, img_array_uint8)
+        return
+    # se non posso sovrascrivere e c'è già → skip
+    return
+
+
 def save_slices_for_orientation(subject,
                                 rel_patient,
                                 modality,
-                                src_path,
                                 vol,
                                 orientation,
                                 crop_box,
                                 valid_indices,
-                                out_dir,
-                                resize_shape,
-                                global_dir=None):
+                                local_out_dir,
+                                subject_in_test: bool):
+    """
+    Salva le slice locali e quelle globali (train/test) a seconda se il soggetto è nel test.
+    """
     ymin, xmin, ymax, xmax = crop_box
-
-    base_name = os.path.basename(src_path)
-    if base_name.lower().endswith(".nii.gz"):
-        base_name = base_name[:-7]
-    elif base_name.lower().endswith(".nii"):
-        base_name = base_name[:-4]
 
     if orientation == 'axial':
         slicer = lambda idx: vol[:, :, idx]
@@ -195,9 +242,15 @@ def save_slices_for_orientation(subject,
     else:
         slicer = lambda idx: vol[idx, :, :]
 
-    os.makedirs(out_dir, exist_ok=True)
-    if orientation == "axial" and global_dir:
-        os.makedirs(global_dir, exist_ok=True)
+    os.makedirs(local_out_dir, exist_ok=True)
+
+    # per il test devo sapere se è una sessione
+    session = None
+    parts = rel_patient.replace("\\", "/").split("/")
+    for p in parts:
+        if p.lower().startswith("ses-"):
+            session = p
+            break
 
     count = 0
     for i in valid_indices:
@@ -206,12 +259,40 @@ def save_slices_for_orientation(subject,
         resized = resize(cropped, resize_shape, preserve_range=True, anti_aliasing=True)
         out_slice = (resized * 255).astype(np.uint8)
 
-        fname = f"{base_name}_slice_{i:03d}.png"
-        local_path = os.path.join(out_dir, fname)
-        imageio.imwrite(local_path, out_slice)
+        fname = build_slice_name(subject, rel_patient, modality, i, ext=".png")
 
-        if orientation == "axial" and global_dir:
-            imageio.imwrite(os.path.join(global_dir, fname), out_slice)
+        # 1) salvataggio locale
+        local_path = os.path.join(local_out_dir, fname)
+        if OVERWRITE or not os.path.exists(local_path):
+            imageio.imwrite(local_path, out_slice)
+
+        # 2) salvataggio globale solo per AXIAL
+        if orientation == "axial":
+            if subject_in_test:
+                # struttura per il test
+                subj_root = os.path.join(TEST_ROOT, subject)
+                if session:
+                    base = os.path.join(subj_root, session, "test")
+                else:
+                    base = os.path.join(subj_root, "test")
+
+                if modality.upper() == "T1":
+                    final_dir = os.path.join(base, "testA")
+                elif modality.upper() == "FLAIR":
+                    final_dir = os.path.join(base, "testB")
+                else:
+                    final_dir = None
+            else:
+                # struttura per il train
+                if modality.upper() == "T1":
+                    final_dir = GLOBAL_TRAIN_A
+                elif modality.upper() == "FLAIR":
+                    final_dir = GLOBAL_TRAIN_B
+                else:
+                    final_dir = None
+
+            if final_dir is not None:
+                save_png_respecting_overwrite(out_slice, final_dir, fname)
 
         count += 1
 
@@ -221,11 +302,7 @@ def save_slices_for_orientation(subject,
 # ========================================
 # PROCESS DI UN SOGGETTO/ANAT
 # ========================================
-def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
-    """
-    Se global_crop_valid è None, calcola il crop (e lo restituisce).
-    Se global_crop_valid NON è None, usa quello per estrarre le stesse slice.
-    """
+def process_subject(subject: str, rel_patient: str, global_crop_valid, subject_in_test: bool):
     print(f"\n=== {subject} | {rel_patient} ===")
 
     skull_dir = os.path.join(base_root, subject, rel_patient)
@@ -233,15 +310,18 @@ def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
         print(f"[SKIP] Nessuna cartella skullstripped qui: {skull_dir}")
         return False, global_crop_valid
 
-    # 🧹 pulizia output
+    # output locale
     out_root = output_root(subject, rel_patient)
     out_parent = os.path.dirname(out_root)
-    if os.path.isdir(out_parent):
-        print(f"   🧹 Output esistente trovato ({out_parent}), lo elimino e ricreo...")
-        shutil.rmtree(out_parent)
+
+    if OVERWRITE:
+        if os.path.isdir(out_parent):
+            print(f"   🧹 Output esistente trovato ({out_parent}), lo elimino e ricreo...")
+            shutil.rmtree(out_parent)
+
     os.makedirs(out_root, exist_ok=True)
 
-    # cerchiamo i volumi disponibili in skullstripped
+    # cerca volumi
     modalities_paths = {}
     for m in ["FLAIR", "T1", "T2"]:
         p = path_modality(subject, rel_patient, m)
@@ -265,7 +345,7 @@ def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
 
     orientations = ["axial", "coronal", "sagittal"]
 
-    # 👉 se non abbiamo ancora il crop globale, lo creiamo adesso da questo soggetto
+    # crop globale
     if global_crop_valid is None:
         crop_valid = {}
         for ori in orientations:
@@ -274,7 +354,6 @@ def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
             print(f"[{ori}] Kept {len(valid_idx)} slices (DEFINITO come riferimento globale)")
         global_crop_valid = crop_valid
     else:
-        # opzionale: potresti verificare che la shape del volume sia compatibile
         print("Uso crop INDICI GLOBALI già calcolati.")
 
     # per ogni modalità
@@ -290,25 +369,16 @@ def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
             ori_dir = os.path.join(mod_dir, ori)
             os.makedirs(ori_dir, exist_ok=True)
 
-            if mod == "T1":
-                g_dir = GLOBAL_TRAIN_A
-            elif mod == "FLAIR":
-                g_dir = GLOBAL_TRAIN_B
-            else:
-                g_dir = None
-
             saved = save_slices_for_orientation(
                 subject,
                 rel_patient,
                 mod,
-                vol_path,
                 vol,
                 ori,
                 crop_box,
                 valid_idx,
                 ori_dir,
-                resize_shape,
-                global_dir=g_dir,
+                subject_in_test=subject_in_test,
             )
             total_saved += saved
             print(f"Saved {saved} {mod} {ori} slices -> {ori_dir}")
@@ -322,11 +392,32 @@ def process_subject(subject: str, rel_patient: str, global_crop_valid=None):
 # MAIN
 # ========================================
 if __name__ == "__main__":
-    missing_skull = []
-    global_crop_valid = None   # 👈 qui terremo il crop del primo soggetto
+    # 1) scopriamo tutte le coppie soggetto/rel
+    pairs = list(discover_subject_anat_pairs(base_root))
 
-    for subject, rel_patient in discover_subject_anat_pairs(base_root):
-        ok, global_crop_valid = process_subject(subject, rel_patient, global_crop_valid)
+    # ricaviamo i soggetti unici che hanno almeno una coppia
+    subjects_with_pairs = sorted({subj for subj, _ in pairs})
+    n_total = len(subjects_with_pairs)
+    n_test = max(1, int(n_total * 0.20))
+
+    random.shuffle(subjects_with_pairs)
+    test_subjects = set(subjects_with_pairs[:n_test])
+    train_subjects = set(subjects_with_pairs[n_test:])
+
+    print("==================================================")
+    print(f"RUN estrazione: {datetime.now().isoformat(sep=' ', timespec='seconds')}")
+    print(f"Soggetti totali con skullstripped: {n_total}")
+    print(f"In TEST (20%): {len(test_subjects)}")
+    print(f"In TRAIN:       {len(train_subjects)}")
+    print("==================================================")
+
+    missing_skull = []
+    global_crop_valid = None
+
+    # 2) processiamo tutte le coppie, ma sapendo se il soggetto è nel test
+    for subject, rel_patient in pairs:
+        in_test = subject in test_subjects
+        ok, global_crop_valid = process_subject(subject, rel_patient, global_crop_valid, in_test)
         if not ok:
             missing_skull.append(f"{subject}/{rel_patient}")
 
@@ -338,19 +429,16 @@ if __name__ == "__main__":
     else:
         print("Tutti avevano skullstripped e almeno una modalità utile.")
 
-    # ========================================
-    # 🔍 REPORT FINALE: confronto trainA / trainB
-    # ========================================
+    # report finale solo sulle cartelle di train
     def count_png(folder):
         return sum(1 for f in Path(folder).glob("*.png"))
 
     count_A = count_png(GLOBAL_TRAIN_A)
     count_B = count_png(GLOBAL_TRAIN_B)
 
-    print("\n📊 Riepilogo finale:")
+    print("\n📊 Riepilogo finale (solo train):")
     print(f"  - trainA (T1)   : {count_A:,} immagini")
     print(f"  - trainB (FLAIR): {count_B:,} immagini")
-
     if count_A == count_B:
         print("✅ Le due cartelle hanno lo stesso numero di immagini (ottimo).")
     else:
