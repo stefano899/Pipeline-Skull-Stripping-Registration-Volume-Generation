@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import SimpleITK as sitk
+import shutil  # <--- NEW per rimuovere la cartella di output
 
 # proviamo a usare tqdm per la barra di avanzamento
 try:
@@ -10,7 +11,7 @@ except ImportError:
 
 # ===================== CONFIG =====================
 
-BASE_DATASET = Path(r"E:\Datasets\NIMH\ds005752-download")  # root dataset originale
+BASE_DATASET = Path(r"E:\Datasets\VOLUMI-SANI-1mm")  # root dataset originale
 MODE = "affine"
 SAVE_TFM = True
 
@@ -20,7 +21,7 @@ SAMPLING_PCT = 0.25
 SHRINK = (4, 2, 1)
 SMOOTH = (2, 1, 0)
 
-OUTPUT_FOLDER_NAME = "coregistrati_t1"
+OUTPUT_FOLDER_NAME = "coregistrati_alla_t1"
 
 # === NUOVO: root parallela dove salvare SOLO i coregistrati ===
 PARALLEL_ROOT = BASE_DATASET.parent / f"{BASE_DATASET.name}_coregistrati"
@@ -120,22 +121,108 @@ def resample_with_tx(moving: sitk.Image, fixed_like: sitk.Image, tx: sitk.Transf
     return sitk.Resample(moving, fixed_like, tx, interp, default_val, moving.GetPixelID())
 
 # ===================== FIND MODALITIES =====================
-
 def find_modalities_in_folder(folder: Path):
-    t1 = t2 = flair = None
+    """
+    Trova T1, T2, FLAIR, PD nella cartella.
+
+    T1:
+      1) se esistono file con 'mprage' e 'scic' nel nome (case-insensitive) -> usa quelli
+      2) altrimenti file con 'mprage'
+      3) altrimenti file con 't1w'
+
+    T2 / FLAIR / PD:
+      - se esistono file con 'scic' nel nome (case-insensitive) -> usa quelli
+      - altrimenti il primo T2/FLAIR/PD trovato.
+
+    ⚠️ Esclude tutti i file che contengono 'mask' nel nome.
+    """
+
+    # ----- T1 -----
+    t1_mprage_scic = None   # mprage + scic (priorità massima)
+    t1_mprage_any = None    # mprage senza scic
+    t1_any = None           # t1w generico
+
+    # ----- T2 / FLAIR / PD -----
+    t2_scic = None
+    t2_any = None
+    flair_scic = None
+    flair_any = None
+    pd_scic = None
+    pd_any = None
+
     for p in folder.glob("*.nii*"):
         name = p.name.lower()
-        if "t1w" in name or "mprage" in name:
-            t1 = p
-        elif "t2w" in name and "t2star" not in name and "t2*" not in name:
-            t2 = p
-        elif "flair" in name:
-            flair = p
-    return t1, t2, flair
+
+        # 🔴 SALTA tutti i file che hanno 'mask' nel nome
+        if "mask" in name:
+            continue
+
+        # ---------- T1 ----------
+        if "mprage" in name:
+            if "scic" in name:
+                if t1_mprage_scic is None:
+                    t1_mprage_scic = p
+            else:
+                if t1_mprage_any is None:
+                    t1_mprage_any = p
+            continue
+
+        if "t1w" in name:
+            if t1_any is None:
+                t1_any = p
+            continue
+
+        # ---------- T2 ----------
+        if "t2w" in name and "t2star" not in name and "t2*" not in name:
+            if "scic" in name:
+                if t2_scic is None:
+                    t2_scic = p
+            else:
+                if t2_any is None:
+                    t2_any = p
+            continue
+
+        # ---------- FLAIR ----------
+        if "flair" in name:
+            if "scic" in name:
+                if flair_scic is None:
+                    flair_scic = p
+            else:
+                if flair_any is None:
+                    flair_any = p
+            continue
+
+        # ---------- PD ----------
+        # semplice: 'pd' nel nome, evitando di confonderlo con t1/t2/flair
+        if "pd" in name and "t1" not in name and "t2" not in name and "flair" not in name:
+            if "scic" in name:
+                if pd_scic is None:
+                    pd_scic = p
+            else:
+                if pd_any is None:
+                    pd_any = p
+            continue
+
+    # scelta finale con le priorità richieste
+    t1 = (
+        t1_mprage_scic
+        if t1_mprage_scic is not None
+        else (t1_mprage_any if t1_mprage_any is not None else t1_any)
+    )
+    t2 = t2_scic if t2_scic is not None else t2_any
+    flair = flair_scic if flair_scic is not None else flair_any
+    pd = pd_scic if pd_scic is not None else pd_any
+
+    return t1, t2, flair, pd
+
 
 # ===================== CHECK GIÀ FATTO (sulla cartella parallela) =====================
 
 def already_processed(parallel_anat_dir: Path, t1_name: str | None) -> bool:
+    """
+    Rimane definita ma non viene più usata per skippare, ora sovrascriviamo sempre
+    la cartella di output se esiste.
+    """
     out_dir = parallel_anat_dir / OUTPUT_FOLDER_NAME
     if not out_dir.is_dir():
         return False
@@ -182,59 +269,78 @@ def process_anat_folder(src_anat_dir: Path, dst_anat_dir: Path):
         work_dir = src_anat_dir
         print(f"   📁 Uso la cartella anat direttamente (input): {work_dir}")
 
-    t1_p, t2_p, flair_p = find_modalities_in_folder(work_dir)
+    # 🔹 ORA prendiamo anche la PD
+    t1_p, t2_p, flair_p, pd_p = find_modalities_in_folder(work_dir)
 
     if t1_p is None:
         print(f"   ❌ Nessuna T1 (t1w / mprage) trovata in {work_dir}, salto.")
         return
 
-    if already_processed(dst_anat_dir, t1_p.name):
-        print(f"   ✅ Coregistrazione già presente per {dst_anat_dir}, salto.")
-        return
-
     print(f"   ✅ Trovata T1: {t1_p.name}")
     if t2_p:
-        print(f"   ✅ Trovata T2: {t2_p.name}")
+        print(f"   ✅ Trovata T2 (preferendo 'scic' se presente): {t2_p.name}")
     else:
         print(f"   ℹ️  Nessuna T2 trovata.")
     if flair_p:
-        print(f"   ✅ Trovata FLAIR: {flair_p.name}")
+        print(f"   ✅ Trovata FLAIR (preferendo 'scic' se presente): {flair_p.name}")
     else:
         print(f"   ℹ️  Nessuna FLAIR trovata.")
+    if pd_p:
+        print(f"   ✅ Trovata PD (preferendo 'scic' se presente): {pd_p.name}")
+    else:
+        print(f"   ℹ️  Nessuna PD trovata.")
 
-    # T1
-    t1_img = read_img(t1_p)
-    t1_img = ensure_isotropic_1mm(t1_img, label="T1")
-
+    # === sovrascrivi sempre la cartella di output eliminandola se esiste ===
     out_dir = dst_anat_dir / OUTPUT_FOLDER_NAME
+    if out_dir.is_dir():
+        print(f"   🗑️  Rimuovo cartella di output esistente: {out_dir}")
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"   📂 Cartella di output parallela: {out_dir}")
 
+    # -------- T1 (fixed) --------
+    t1_img = read_img(t1_p)
+    t1_img = ensure_isotropic_1mm(t1_img, label="T1")
     write_img(t1_img, out_dir / t1_p.name)
 
-    # T2 → T1
+    # -------- T2 → T1 --------
     if t2_p is not None:
         t2_img = read_img(t2_p)
         print("   🔁 Registro T2 → T1 ...")
         t2_tx, t2_metric = register(t1_img, t2_img, mode=MODE)
         print(f"   📏 Metrica T2→T1: {t2_metric:.6f}")
-        t2_coreg = resample_with_tx(t2_img, t1_img, t2_tx, interp=sitk.sitkLinear, default_val=0.0)
+        t2_coreg = resample_with_tx(t2_img, t1_img, t2_tx,
+                                    interp=sitk.sitkLinear, default_val=0.0)
         t2_coreg = ensure_isotropic_1mm(t2_coreg, label="T2_coreg")
         write_img(t2_coreg, out_dir / t2_p.name)
         if SAVE_TFM:
             write_tx(t2_tx, out_dir / f"{t2_p.stem}_to_T1.tfm")
 
-    # FLAIR → T1
+    # -------- FLAIR → T1 --------
     if flair_p is not None:
         flair_img = read_img(flair_p)
         print("   🔁 Registro FLAIR → T1 ...")
         flair_tx, flair_metric = register(t1_img, flair_img, mode=MODE)
         print(f"   📏 Metrica FLAIR→T1: {flair_metric:.6f}")
-        flair_coreg = resample_with_tx(flair_img, t1_img, flair_tx, interp=sitk.sitkLinear, default_val=0.0)
+        flair_coreg = resample_with_tx(flair_img, t1_img, flair_tx,
+                                       interp=sitk.sitkLinear, default_val=0.0)
         flair_coreg = ensure_isotropic_1mm(flair_coreg, label="FLAIR_coreg")
         write_img(flair_coreg, out_dir / flair_p.name)
         if SAVE_TFM:
             write_tx(flair_tx, out_dir / f"{flair_p.stem}_to_T1.tfm")
+
+    # -------- PD → T1 --------
+    if pd_p is not None:
+        pd_img = read_img(pd_p)
+        print("   🔁 Registro PD → T1 ...")
+        pd_tx, pd_metric = register(t1_img, pd_img, mode=MODE)
+        print(f"   📏 Metrica PD→T1: {pd_metric:.6f}")
+        pd_coreg = resample_with_tx(pd_img, t1_img, pd_tx,
+                                    interp=sitk.sitkLinear, default_val=0.0)
+        pd_coreg = ensure_isotropic_1mm(pd_coreg, label="PD_coreg")
+        write_img(pd_coreg, out_dir / pd_p.name)
+        if SAVE_TFM:
+            write_tx(pd_tx, out_dir / f"{pd_p.stem}_to_T1.tfm")
 
 # ===================== MAIN =====================
 

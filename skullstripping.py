@@ -225,13 +225,13 @@ def main():
                 continue
 
             # se c'è la cartella coreg, lavoriamo lì
-            coreg_dir = anat_dir / "volumi_coregistrati_alla_t1"
+            coreg_dir = anat_dir / "coregistrati_alla_t1"
             if coreg_dir.is_dir():
                 print(f"      📁 Uso i volumi coregistrati: {coreg_dir}")
                 files = find_subject_files_in(coreg_dir)
                 src_folder = coreg_dir
             else:
-                print(f"      ⚠️ Nessuna 'volumi_coregistrati_alla_t1', uso {anat_dir}")
+                print(f"      ⚠️ Nessuna 'coregistrati_alla_t1', uso {anat_dir}")
                 files = find_subject_files_in(anat_dir)
                 src_folder = anat_dir
 

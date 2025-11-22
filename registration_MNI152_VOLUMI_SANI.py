@@ -13,12 +13,11 @@ except ImportError:
 # ======================================================
 # CONFIG
 # ======================================================
-SRC_ROOT = r"E:\Datasets\NIMH\ds005752-download_coregistrati"          # dataset sorgente
-DST_ROOT = r"E:\Datasets\NIMH\ds005752-download_coregistrati_MNI"      # dataset di output (stessa struttura)
+SRC_ROOT = r"E:\Datasets\VOLUMI-SANI-1mm"          # dataset sorgente
+DST_ROOT = r"E:\Datasets\VOLUMI-SANI-1mm_coregistrati"      # dataset di output (stessa struttura)
 
 # metti qui il tuo template MNI
-MNI_T1 = r"C:\Users\stefa\Documents\cervelli\SkullStripping\Mni152Registration\mni152\icbm_avg_152_t1_tal_nlin_symmetric_VI_mask.nii"
-
+MNI_T1 = r"C:\Users\Stefano\Desktop\Stefano\Codice_skull\Auto-SkullStripping\Mni152Registration\mni152\icbm_avg_152_t1_tal_nlin_symmetric_VI_mask.nii"
 # tipo di registrazione mod → T1
 TYPE_M2T1 = "Rigid"   # "Rigid" | "AffineFast" | "Affine"
 
@@ -49,7 +48,7 @@ def discover_skullstripped_folders(root: str):
         # subXX/anat/skullstripped
         anat = subj / "anat"
         if anat.is_dir():
-            skull = anat / "skullstripped"
+            skull = anat / "volumi_coregistrati_alla_t1_bias"
             if skull.is_dir():
                 out.append((subj.name, "anat/skullstripped"))
 
@@ -57,7 +56,7 @@ def discover_skullstripped_folders(root: str):
         for ses in subj.glob("ses-*"):
             ses_anat = ses / "anat"
             if ses_anat.is_dir():
-                skull = ses_anat / "skullstripped"
+                skull = ses_anat / "volumi_coregistrati_alla_t1_bias"
                 if skull.is_dir():
                     rel = skull.relative_to(subj)
                     out.append((subj.name, str(rel)))   # es: "ses-01/anat/skullstripped"
