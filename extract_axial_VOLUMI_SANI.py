@@ -16,17 +16,17 @@ except ImportError:
 # ========================================
 # CONFIG GENERALE
 # ========================================
-base_root = r"E:\Datasets\Volumi_sani_T1_E_FLAIR_1mm_MNI"
+base_root = r"C:\Users\Stefano\Desktop\Stefano\Datasets\IXI-SKULLSTRIPPED\IXI_SKULLSTRIPPED_MNI"
 
 # 🔹 output globale per il TRAIN
-TRAIN_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\training_T1_FLAIR_Sani_Mni_Bias\train"
+TRAIN_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\training_T1_PD_Sani_Mni_Bias\train"
 GLOBAL_TRAIN_A = os.path.join(TRAIN_ROOT, "trainA")  # es: T1
-GLOBAL_TRAIN_B = os.path.join(TRAIN_ROOT, "trainB")  # es: FLAIR
+GLOBAL_TRAIN_B = os.path.join(TRAIN_ROOT, "trainB")  # es: T2 (o altra)
 TARGET_MODALITY_trainA = "T1"
-TARGET_MODALITY_trainB = "FLAIR"
+TARGET_MODALITY_trainB = "PD"
 
 # 🔹 output strutturato per il TEST
-TEST_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\training_T1_FLAIR_Sani_Mni_Bias\test"
+TEST_ROOT = r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\training_T1_PD_Sani_Mni_Bias\test"
 
 os.makedirs(GLOBAL_TRAIN_A, exist_ok=True)
 os.makedirs(GLOBAL_TRAIN_B, exist_ok=True)
@@ -42,13 +42,47 @@ ADD_ONLY_MISSING = False
 EFFECTIVE_OVERWRITE = OVERWRITE and not ADD_ONLY_MISSING
 
 # modalità di riferimento per trovare le slice da togliere e da tenere
-ref_modality = "FLAIR"
+ref_modality = "T1"
 
 # threshold per tenere/filtrare slice troppo vuote (calcolato SOLO su ref_modality)
-nz_threshold = 500
+nz_threshold = 400
 
 # 🔹 shape target del volume dopo trim: (X, Y, Z)
 TARGET_SHAPE = (192, 228, 192)  # -> slice assiali 192x228
+
+
+# ========================================
+# UTILITY NOMI NON COLLIDENTI
+# ========================================
+def make_non_colliding_path(path: str | Path) -> str:
+    """
+    Se il file esiste, aggiunge _1, _2, ... prima dell'estensione.
+    Gestisce anche .nii.gz.
+
+    Esempi:
+        img.png      -> img_1.png
+        flair.nii.gz -> flair_1.nii.gz
+    """
+    p = Path(path)
+    if not p.exists():
+        return str(p)
+
+    stem = p.stem
+    suffix = p.suffix
+
+    # caso speciale .nii.gz
+    if suffix == ".gz" and stem.endswith(".nii"):
+        stem = stem[:-4]         # rimuove ".nii"
+        suffix = ".nii.gz"
+
+    counter = 1
+    while True:
+        new_name = f"{stem}_{counter}{suffix}"
+        new_p = p.with_name(new_name)
+        if not new_p.exists():
+            return str(new_p)
+        counter += 1
+
 
 # ========================================
 # CONFIG SPLIT TRAIN/TEST
@@ -59,16 +93,14 @@ N_TRAIN_SUBJECTS = None  # se != None, ignora TRAIN_FRACTION e usa questo numero
 # fissiamo seed per riproducibilità
 random.seed(40)
 
+
 # ========================================
 # DISCOVERY DELLE CARTELLE
 # ========================================
 def discover_subject_anat_pairs(root: str):
     """
-    Ritorna tutte le coppie (subj, path_relativo) dove esiste
-    'anat/volumi_coregistrati_alla_t1_bias'.
-
-    Se NON esiste quella cartella, in fallback usa 'anat/skullstripped'.
-    Gestisce sia sub/... che sub/ses-.../...
+    Cerca per ogni soggetto la cartella 'anat_bias' direttamente sotto sub-XX/.
+    Ritorna coppie (subject, 'anat_bias') solo se la cartella esiste.
     """
     root_p = Path(root)
 
@@ -78,41 +110,19 @@ def discover_subject_anat_pairs(root: str):
         if not subj.name.lower().startswith("sub"):
             continue
 
-        # ===== Caso 1: subXX/anat/...
-        anat_dir = subj / "anat"
-        if anat_dir.is_dir():
-            bias_dir = anat_dir / "volumi_coregistrati_alla_t1_bias"
-            skull_dir = anat_dir / "skullstripped"
+        anat_bias = subj / "anat_bias"
+        if anat_bias.is_dir():
+            yield (subj.name, "anat_bias")
 
-            if bias_dir.is_dir():
-                # PRIORITÀ: cartella bias
-                yield (subj.name, "anat/volumi_coregistrati_alla_t1_bias")
-            elif skull_dir.is_dir():
-                # fallback opzionale sui grezzi
-                yield (subj.name, "anat/skullstripped")
-
-        # ===== Caso 2: subXX/ses-YY/anat/...
-        for ses in sorted(subj.glob("ses-*"), key=lambda p: p.name):
-            ses_anat = ses / "anat"
-            if not ses_anat.is_dir():
-                continue
-
-            bias_dir = ses_anat / "volumi_coregistrati_alla_t1_bias"
-            skull_dir = ses_anat / "skullstripped"
-
-            if bias_dir.is_dir():
-                # PRIORITÀ: cartella bias nella sessione
-                rel = bias_dir.relative_to(subj)
-                yield (subj.name, str(rel))
-            elif skull_dir.is_dir():
-                # fallback opzionale sui grezzi
-                rel = skull_dir.relative_to(subj)
-                yield (subj.name, str(rel))
 
 # ========================================
-# PATH PER LE MODALITÀ (dentro skullstripped/bias)
+# PATH PER LE MODALITÀ (dentro anat_bias)
 # ========================================
 def path_modality(subject: str, rel_patient: str, modality: str):
+    """
+    Cerca il file della modalità richiesta dentro:
+        base_root / subject / rel_patient   (dove rel_patient = 'anat_bias')
+    """
     folder = os.path.join(base_root, subject, rel_patient)
     if not os.path.isdir(folder):
         return None
@@ -121,7 +131,7 @@ def path_modality(subject: str, rel_patient: str, modality: str):
         "FLAIR": ["flair"],
         "T1": ["t1w", "mprage", "t1", "T1"],
         "T2": ["t2w", "_t2", "-t2", "t2.", "T2"],
-        "PD": ["_pd", "pd.", "PD"],
+        "PD": ["_pd", "-pd", "pd-bias", "pd"],
         "T1c": ["t1c", "t1_gad", "t1-contr", "t1ce"],
         "GADO": ["gado"],
     }
@@ -162,6 +172,9 @@ def path_modality(subject: str, rel_patient: str, modality: str):
 # OUTPUT LOCALE
 # ========================================
 def output_root(subject: str, rel_patient: str) -> str:
+    """
+    Cartella di output locale per le slice del soggetto/modality/orientazione.
+    """
     return os.path.join(base_root, subject, rel_patient, "Output", "ALL_AXES")
 
 
@@ -299,22 +312,12 @@ def pad_or_crop_to_shape(vol: np.ndarray, target_shape):
 
 def build_slice_name(subject, rel_patient, modality, slice_idx, ext=".png"):
     """
-    Nome file = subject[_session]_MODALITY_slice_XXX.png
-    Dove session è opzionale (solo se nel path c'è qualcosa tipo 'ses-01').
+    Nome file = subject_MODALITY_slice_XXX.png
+    (rel_patient non è più usato per la sessione, ma lo manteniamo in firma
+     per compatibilità con il resto del codice).
     """
-    session = None
-    parts = rel_patient.replace("\\", "/").split("/")
-    for p in parts:
-        if p.lower().startswith("ses-"):
-            session = p
-            break
-
     modality = modality.upper()
-
-    if session:
-        return f"{subject}_{session}_{modality}_slice_{slice_idx:03d}{ext}"
-    else:
-        return f"{subject}_{modality}_slice_{slice_idx:03d}{ext}"
+    return f"{subject}_{modality}_slice_{slice_idx:03d}{ext}"
 
 
 def save_png_respecting_overwrite(img_array_uint8, dst_folder, filename):
@@ -322,13 +325,15 @@ def save_png_respecting_overwrite(img_array_uint8, dst_folder, filename):
     out_path = os.path.join(dst_folder, filename)
 
     if EFFECTIVE_OVERWRITE:
+        # modalità "hard overwrite"
         imageio.imwrite(out_path, img_array_uint8)
         return
 
-    if not os.path.exists(out_path):
-        imageio.imwrite(out_path, img_array_uint8)
-        return
-    # altrimenti non sovrascrivo
+    # modalità non-distruttiva: se esiste, crea un nuovo nome con _1, _2, ...
+    if os.path.exists(out_path):
+        out_path = make_non_colliding_path(out_path)
+
+    imageio.imwrite(out_path, img_array_uint8)
     return
 
 
@@ -411,14 +416,6 @@ def save_slices_for_orientation(subject,
     else:
         indices = slice_indices
 
-    # recupero sessione (se esiste) per la struttura di test
-    session = None
-    parts = rel_patient.replace("\\", "/").split("/")
-    for p in parts:
-        if p.lower().startswith("ses-"):
-            session = p
-            break
-
     count = 0
     for i in indices:
         sl = slicer(i)          # slice 2D [0,1] già della dimensione vol[x,y]
@@ -435,16 +432,11 @@ def save_slices_for_orientation(subject,
         if orientation == "axial":
             if subject_in_test:
                 # struttura per il test
-                subj_root = os.path.join(TEST_ROOT, subject)
-                if session:
-                    base = os.path.join(subj_root, session, "test")
-                else:
-                    base = os.path.join(subj_root, "test")
-
+                subj_root = os.path.join(TEST_ROOT, subject, "test")
                 if modality.upper() == TARGET_MODALITY_trainA:
-                    final_dir = os.path.join(base, "testA")
+                    final_dir = os.path.join(subj_root, "testA")
                 elif modality.upper() == TARGET_MODALITY_trainB:
-                    final_dir = os.path.join(base, "testB")
+                    final_dir = os.path.join(subj_root, "testB")
                 else:
                     final_dir = None
             else:
@@ -472,35 +464,27 @@ def save_slices_for_orientation(subject,
 def copy_originals_to_test(subject, rel_patient, modalities_paths, subject_in_test: bool):
     """
     Se il soggetto è nel TEST, copia i volumi originali nella struttura:
-      TEST_ROOT/subject[/ses-XX]/anat/skullstripped/
-    senza sovrascrivere se EFFECTIVE_OVERWRITE = False.
+      TEST_ROOT/subject/anat_bias/
+
+    In modalità non-distruttiva (EFFECTIVE_OVERWRITE=False), se il file esiste
+    viene salvato con suffisso _1, _2, ...
     """
     if not subject_in_test:
         return
 
-    session = None
-    parts = rel_patient.replace("\\", "/").split("/")
-    for p in parts:
-        if p.lower().startswith("ses-"):
-            session = p
-            break
-
     subj_root = os.path.join(TEST_ROOT, subject)
-    if session:
-        skull_dir = os.path.join(subj_root, session, "anat", "skullstripped")
-    else:
-        skull_dir = os.path.join(subj_root, "anat", "skullstripped")
+    anat_bias_dir = os.path.join(subj_root, "anat_bias")
 
-    os.makedirs(skull_dir, exist_ok=True)
+    os.makedirs(anat_bias_dir, exist_ok=True)
 
     for mod, src_path in modalities_paths.items():
         if src_path is None or not os.path.isfile(src_path):
             continue
         fname = os.path.basename(src_path)
-        dst_path = os.path.join(skull_dir, fname)
+        dst_path = os.path.join(anat_bias_dir, fname)
 
         if os.path.exists(dst_path) and not EFFECTIVE_OVERWRITE:
-            continue
+            dst_path = make_non_colliding_path(dst_path)
 
         shutil.copy2(src_path, dst_path)
         print(f"   [TEST COPY] {mod}: {src_path} -> {dst_path}")
@@ -512,9 +496,9 @@ def copy_originals_to_test(subject, rel_patient, modalities_paths, subject_in_te
 def process_subject(subject: str, rel_patient: str, subject_in_test: bool):
     print(f"\n=== {subject} | {rel_patient} ===")
 
-    skull_dir = os.path.join(base_root, subject, rel_patient)
-    if not os.path.isdir(skull_dir):
-        print(f"[SKIP] Nessuna cartella skullstripped qui: {skull_dir}")
+    anat_dir = os.path.join(base_root, subject, rel_patient)
+    if not os.path.isdir(anat_dir):
+        print(f"[SKIP] Nessuna cartella anat_bias qui: {anat_dir}")
         return False
 
     # output locale
@@ -537,7 +521,7 @@ def process_subject(subject: str, rel_patient: str, subject_in_test: bool):
             modalities_paths[m] = p
 
     if not modalities_paths:
-        print(f"[SKIP] Nessuna modalità trovata in {skull_dir}")
+        print(f"[SKIP] Nessuna modalità trovata in {anat_dir}")
         return False
 
     # copia i volumi originali nella struttura di TEST (se soggetto di test)
@@ -620,6 +604,10 @@ if __name__ == "__main__":
     subjects_with_pairs = sorted({subj for subj, _ in pairs})
     n_total = len(subjects_with_pairs)
 
+    if n_total == 0:
+        print("⚠️ Nessun soggetto con cartella 'anat_bias' trovato in base_root.")
+        raise SystemExit
+
     # decidi quanti soggetti vanno in train
     if N_TRAIN_SUBJECTS is not None:
         n_train = max(1, min(N_TRAIN_SUBJECTS, n_total - 1))
@@ -635,7 +623,7 @@ if __name__ == "__main__":
 
     print("==================================================")
     print(f"RUN estrazione: {datetime.now().isoformat(sep=' ', timespec='seconds')}")
-    print(f"Soggetti totali con skullstripped/bias: {n_total}")
+    print(f"Soggetti totali con anat_bias: {n_total}")
     print(f"In TRAIN: {len(train_subjects)}")
     print(f"In TEST : {len(test_subjects)}")
     print(f"MODALITÀ FILE: OVERWRITE={OVERWRITE} | ADD_ONLY_MISSING={ADD_ONLY_MISSING} | EFFECTIVE_OVERWRITE={EFFECTIVE_OVERWRITE}")

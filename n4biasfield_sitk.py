@@ -5,18 +5,10 @@ presenti nelle cartelle 'skullstripped' (o nelle loro sotto-cartelle)
 di tutti i soggetti 'sub*' in BASE_DIR.
 
 Per ciascuna 'skullstripped', crea una cartella sorella
-'volumi_coregistrati_alla_t1_bias' dove salva i volumi corretti.
+'volumi_coregistrati_alla_t1_bias' (ma in questo script la struttura
+viene ricreata sotto OUTPUT_BASE_DIR) dove salva i volumi corretti.
 
 Output filename: <subject>-<mod>-bias.nii.gz
-
-Esempi di naming:
-    Input :
-        E:\\Datasets\\Volumi_sani_T1_E_FLAIR_1mm_MNI\\sub01\\anat\\skullstripped\\sub-00002_acqsel_FLAIR_to_mni.nii.gz
-        E:\\Datasets\\Volumi_sani_T1_E_FLAIR_1mm_MNI\\sub01\\anat\\skullstripped\\sub-00002_acq-iso08_T1w-stripped_to_mni.nii.gz
-
-    Output:
-        sub-00002-FLAIR-bias.nii.gz
-        sub-00002-T1-bias.nii.gz
 """
 
 import sys
@@ -30,7 +22,10 @@ from tqdm import tqdm      # <-- aggiunto per le barre di avanzamento
 # PATH BASE E PARAMETRI
 # ================================
 
-BASE_DIR = Path(r"E:\Datasets\Volumi_sani_T1_E_FLAIR_1mm_MNI")
+BASE_DIR = Path(r"E:\Datasets\NIMH\ds005752-download_coregistrati_MNI")
+
+# 🔹 NUOVA CARTELLA DI OUTPUT (RICHIESTA)
+OUTPUT_BASE_DIR = Path(r"C:\Users\Stefano\Desktop\Stefano\Datasets\NihmBias")
 
 # ================================
 # OPZIONE DI SOVRASCRITTURA
@@ -49,12 +44,19 @@ NIFTI_EXTS = (".nii.gz", ".nii")
 # ================================
 
 def subjects_under(base: Path):
-    """Ritorna tutte le cartelle soggetto: directory che iniziano con 'sub'."""
+    """Ritorna tutte le cartelle soggetto: directory che iniziano con 'sub'.
+
+    🔹 MODIFICATO: gestisce directory illeggibili (WinError 1392, ecc.)
+    """
     if not base.exists():
         raise FileNotFoundError(f"Base non trovata: {base}")
     for d in sorted(base.iterdir()):
-        if d.is_dir() and d.name.lower().startswith("sub"):
-            yield d
+        try:
+            if d.is_dir() and d.name.lower().startswith("sub"):
+                yield d
+        except OSError as e:
+            # Qui saltiamo la directory marcia invece di far crashare tutto
+            print(f"[WARN] Salto directory illeggibile: {d} ({e})")
 
 
 def is_nifti(path: Path) -> bool:
@@ -69,8 +71,11 @@ def find_volcoreg_dirs(subject_dir: Path):
         sub01/anat/skullstripped
     """
     for p in subject_dir.rglob("skullstripped"):
-        if p.is_dir():
-            yield p
+        try:
+            if p.is_dir():
+                yield p
+        except OSError as e:
+            print(f"[WARN] Salto cartella 'skullstripped' illeggibile: {p} ({e})")
 
 
 def guess_subject_and_modality(path: Path, default_subj: str):
@@ -78,15 +83,6 @@ def guess_subject_and_modality(path: Path, default_subj: str):
     Estrae:
       - subject: da 'sub-XXXX' nel nome del file (se presente), altrimenti usa default_subj
       - modality: UNA tra 'T1', 'T2', 'FLAIR' cercando il pattern nel nome file (case-insensitive).
-
-    Esempi:
-        sub-00002_acqsel_FLAIR_to_mni.nii.gz
-            -> subject = sub-00002
-            -> modality = FLAIR
-
-        sub-00002_acq-iso08_T1w-stripped_to_mni.nii.gz
-            -> subject = sub-00002
-            -> modality = T1
     """
     name = path.name
     base = name
@@ -120,17 +116,13 @@ def guess_subject_and_modality(path: Path, default_subj: str):
 
 def run_n4_bias(input_nii: Path, output_nii: Path):
     """Esegue N4 bias field correction con SimpleITK su un singolo volume."""
-    #  Nota: qui dentro ora uso la logica dell'esempio SimpleITK N4BiasFieldImageFilter.
     print(f"      [N4/SITK] N4 su: {input_nii}")
     try:
-        # Lettura input come float32 (come nell'esempio)
         inputImage = sitk.ReadImage(str(input_nii), sitk.sitkFloat32)
         image = inputImage
 
-        # Maschera: se non fornita, usa Otsu (come nell'esempio)
         maskImage = sitk.OtsuThreshold(inputImage, 0, 1, 200)
 
-        # shrinkFactor: replica la logica dell'esempio, ma qui fisso a 1 (nessun downsample)
         shrinkFactor = 1
         if shrinkFactor > 1:
             image = sitk.Shrink(
@@ -140,31 +132,19 @@ def run_n4_bias(input_nii: Path, output_nii: Path):
                 maskImage, [shrinkFactor] * inputImage.GetDimension()
             )
 
-        # Filtro N4
         corrector = sitk.N4BiasFieldCorrectionImageFilter()
-
-        # numberFittingLevels: come nell'esempio, default a 4
         numberFittingLevels = 4
-
-        # Se vuoi imitare la riga:
-        # corrector.SetMaximumNumberOfIterations([int(args[5])] * numberFittingLevels)
-        # puoi fissare un numero di iterazioni ad es. 50:
+        # Se vuoi, puoi impostare esplicitamente le iterazioni:
         # corrector.SetMaximumNumberOfIterations([50] * numberFittingLevels)
 
-        # Esegue la correzione (su immagine eventualmente shrinkata)
         corrected_image = corrector.Execute(image, maskImage)
-
-        # Calcola il log bias field alla risoluzione piena
         log_bias_field = corrector.GetLogBiasFieldAsImage(inputImage)
-
-        # Ricostruisce la versione full-resolution corretta
         corrected_image_full_resolution = inputImage / sitk.Exp(log_bias_field)
 
-        # Salva il risultato finale alla risoluzione originale
-        sitk.WriteImage(corrected_image_full_resolution, str(output_nii))
+        # Assicurati che la cartella di output esista
+        output_nii.parent.mkdir(parents=True, exist_ok=True)
 
-        # Se shrinkFactor > 1 potresti anche salvare l'immagine shrinkata:
-        # sitk.WriteImage(corrected_image, "Python-Example-N4BiasFieldCorrection-shrunk.nrrd")
+        sitk.WriteImage(corrected_image_full_resolution, str(output_nii))
 
         print(f"      ✅ Salvato: {output_nii}")
     except Exception as e:
@@ -181,15 +161,33 @@ def collect_nifti_files(vol_dir: Path):
     print(f"      [DEBUG] Cerco NIfTI in: {vol_dir}")
 
     direct_files = []
-    for f in sorted(vol_dir.iterdir()):
-        if f.is_file() and is_nifti(f):
-            direct_files.append(f)
+    try:
+        for f in sorted(vol_dir.iterdir()):
+            try:
+                if f.is_file() and is_nifti(f):
+                    direct_files.append(f)
+            except OSError as e:
+                print(f"      [WARN] Salto file illeggibile: {f} ({e})")
+    except OSError as e:
+        print(f"      [WARN] Impossibile iterare {vol_dir}: {e}")
+        return []
 
     if direct_files:
         print(f"      [DEBUG] Trovati {len(direct_files)} file nella cartella principale.")
         return direct_files
 
-    nested = [f for f in vol_dir.rglob("*") if f.is_file() and is_nifti(f)]
+    nested = []
+    try:
+        for f in vol_dir.rglob("*"):
+            try:
+                if f.is_file() and is_nifti(f):
+                    nested.append(f)
+            except OSError as e:
+                print(f"      [WARN] Salto file (rglob) illeggibile: {f} ({e})")
+    except OSError as e:
+        print(f"      [WARN] Impossibile fare rglob in {vol_dir}: {e}")
+        return []
+
     if nested:
         print(f"      [DEBUG] Trovati {len(nested)} file nelle sotto-cartelle.")
         return nested
@@ -205,8 +203,12 @@ def collect_nifti_files(vol_dir: Path):
 def main():
     print("[INFO] Avvio N4 bias correction")
     print(f"[INFO] BASE_DIR           = {BASE_DIR}")
+    print(f"[INFO] OUTPUT_BASE_DIR    = {OUTPUT_BASE_DIR}")
     print(f"[INFO] OVERWRITE_EXISTING = {OVERWRITE_EXISTING}")
     print("============================================================\n")
+
+    # Creo la cartella base di output se non esiste
+    OUTPUT_BASE_DIR.mkdir(parents=True, exist_ok=True)
 
     if "ants" not in sys.modules:
         print("❌ ERRORE: modulo 'ants' non disponibile (antspyx).")
@@ -216,7 +218,6 @@ def main():
     total_dirs = 0
     total_vols = 0
 
-    # tqdm sui soggetti
     subj_list = list(subjects_under(BASE_DIR))
     for subj in tqdm(subj_list, desc="Soggetti", unit="subj"):
         total_subj += 1
@@ -233,11 +234,18 @@ def main():
         print(f"  ✓ Trovate {len(vol_dirs)} cartelle 'skullstripped'.")
         total_dirs += len(vol_dirs)
 
-        # tqdm sulle cartelle skullstripped
         for vol_dir in tqdm(vol_dirs, desc=f"{subj_name} - skullstripped", unit="dir", leave=False):
 
-            # Cartella di output sorella
-            out_dir = vol_dir.parent / "volumi_coregistrati_alla_t1_bias"
+            # 🔹 NUOVA LOGICA DI OUTPUT:
+            # ricreo la struttura relativa a partire da BASE_DIR dentro OUTPUT_BASE_DIR
+            try:
+                rel_parent = vol_dir.parent.relative_to(BASE_DIR)
+            except ValueError:
+                # In casi strani in cui vol_dir non è sotto BASE_DIR,
+                # metto tutto sotto una cartella del soggetto.
+                rel_parent = Path(subj_name)
+
+            out_dir = OUTPUT_BASE_DIR / rel_parent / "volumi_coregistrati_alla_t1_bias"
 
             # Se devo sovrascrivere, elimino completamente la cartella di output
             if OVERWRITE_EXISTING and out_dir.exists():
@@ -245,7 +253,7 @@ def main():
                 shutil.rmtree(out_dir)
 
             # (ri)creo la cartella
-            out_dir.mkdir(exist_ok=True)
+            out_dir.mkdir(parents=True, exist_ok=True)
 
             print(f"\n  [DIR] Input : {vol_dir}")
             print(f"       Output: {out_dir}")
@@ -254,10 +262,8 @@ def main():
             if not vols:
                 continue
 
-            # tqdm sui volumi
             for v in tqdm(vols, desc=f"{subj_name} - volumi", unit="vol", leave=False):
 
-                # SKIP se il volume è una maschera
                 if "mask" in v.name.lower():
                     print(f"      [SKIP] Volume di maschera (no N4): {v.name}")
                     continue
@@ -266,7 +272,6 @@ def main():
                 out_name = f"{subj_id}-{mod}-bias.nii.gz"
                 out_path = out_dir / out_name
 
-                # Se NON sovrascrivo e il file esiste già, salto
                 if out_path.exists() and not OVERWRITE_EXISTING:
                     print(f"      [SKIP] Esiste già: {out_path}")
                     continue

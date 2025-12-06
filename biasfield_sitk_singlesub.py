@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 Versione per singolo soggetto: imposta TARGET_SUBJECT = "subXX"
+Applica N4 ai volumi che si trovano in 'volumi_generati_no_bandoni'
+e salva il risultato nella STESSA cartella.
 """
 
 import sys
@@ -14,9 +16,11 @@ from tqdm import tqdm
 # PARAMETRI
 # ================================
 
-BASE_DIR = Path(r"E:\Datasets\Volumi_sani_T1_E_FLAIR_1mm_MNI")
+BASE_DIR = Path(
+    r"C:\Users\Stefano\Desktop\Stefano\CycleGan\pytorch-CycleGAN-and-pix2pix\data_training\training_T1_FLAIR_Sani_Mni_Bias\test"
+)
 
-TARGET_SUBJECT = "sub130"   # <<< QUI scegli il soggetto da processare!
+TARGET_SUBJECT = "sub139"   # <<< QUI scegli il soggetto da processare!
 
 OVERWRITE_EXISTING = True
 NIFTI_EXTS = (".nii.gz", ".nii")
@@ -37,7 +41,11 @@ def is_nifti(path: Path) -> bool:
 
 
 def find_volcoreg_dirs(subject_dir: Path):
-    for p in subject_dir.rglob("skullstripped"):
+    """
+    In questa versione cerchiamo le cartelle chiamate
+    'volumi_generati_no_bandoni' all'interno del soggetto.
+    """
+    for p in subject_dir.rglob("volumes_generated_no_bandoni"):
         if p.is_dir():
             yield p
 
@@ -131,30 +139,25 @@ def main():
 
     print(f"[SOGGETTO] {TARGET_SUBJECT}")
 
+    # ora cerchiamo le cartelle 'volumi_generati_no_bandoni' dentro il soggetto
     vol_dirs = list(find_volcoreg_dirs(subj_dir))
 
     if not vol_dirs:
-        print("  ⚠️ Nessuna cartella 'skullstripped' trovata per questo soggetto.")
+        print("  ⚠️ Nessuna cartella 'volumi_generati_no_bandoni' trovata per questo soggetto.")
         sys.exit(1)
 
-    print(f"  ✓ Trovate {len(vol_dirs)} cartelle 'skullstripped'.")
+    print(f"  ✓ Trovate {len(vol_dirs)} cartelle 'volumi_generati_no_bandoni'.")
 
     total_vols = 0
 
-    # tqdm sulle cartelle skullstripped
-    for vol_dir in tqdm(vol_dirs, desc="Cartelle skullstripped", unit="dir"):
+    # tqdm sulle cartelle volumi_generati_no_bandoni
+    for vol_dir in tqdm(vol_dirs, desc="Cartelle volumi_generati_no_bandoni", unit="dir"):
 
-        out_dir = vol_dir.parent / "volumi_coregistrati_alla_t1_bias"
+        # In questa versione NON creiamo una cartella output separata:
+        # usiamo direttamente vol_dir come cartella di output.
+        out_dir = vol_dir
 
-        # pulizia cartella output
-        if OVERWRITE_EXISTING and out_dir.exists():
-            print(f"  [CLEAN] Rimuovo cartella: {out_dir}")
-            shutil.rmtree(out_dir)
-
-        out_dir.mkdir(exist_ok=True)
-
-        print(f"\n  [DIR] Input : {vol_dir}")
-        print(f"       Output: {out_dir}")
+        print(f"\n  [DIR] Input/Output : {out_dir}")
 
         vols = collect_nifti_files(vol_dir)
         if not vols:
@@ -163,8 +166,13 @@ def main():
         # tqdm sui volumi
         for v in tqdm(vols, desc="Volumi", unit="vol", leave=False):
 
-            if "mask" in v.name.lower():
+            name_low = v.name.lower()
+            # Skippa maschere e volumi già bias-corretti
+            if "mask" in name_low:
                 print(f"      [SKIP] Volume di maschera: {v.name}")
+                continue
+            if "bias" in name_low:
+                print(f"      [SKIP] Volume già bias-corrected (contiene 'bias' nel nome): {v.name}")
                 continue
 
             subj_id, mod = guess_subject_and_modality(v, default_subj=TARGET_SUBJECT)
