@@ -48,7 +48,7 @@ def discover_skullstripped_folders(root: str):
         # subXX/anat/skullstripped
         anat = subj / "anat"
         if anat.is_dir():
-            skull = anat / "volumi_coregistrati_alla_t1_bias"
+            skull = anat / "volumi_coregistrati_alla_t1"
             if skull.is_dir():
                 out.append((subj.name, "anat/skullstripped"))
 
@@ -56,7 +56,7 @@ def discover_skullstripped_folders(root: str):
         for ses in subj.glob("ses-*"):
             ses_anat = ses / "anat"
             if ses_anat.is_dir():
-                skull = ses_anat / "volumi_coregistrati_alla_t1_bias"
+                skull = ses_anat / "volumi_coregistrati_alla_t1"
                 if skull.is_dir():
                     rel = skull.relative_to(subj)
                     out.append((subj.name, str(rel)))   # es: "ses-01/anat/skullstripped"
@@ -280,3 +280,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
