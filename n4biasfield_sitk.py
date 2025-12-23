@@ -245,7 +245,7 @@ def main():
                 # metto tutto sotto una cartella del soggetto.
                 rel_parent = Path(subj_name)
 
-            out_dir = OUTPUT_BASE_DIR / rel_parent / "volumi_coregistrati_alla_t1_bias"
+            out_dir = OUTPUT_BASE_DIR / rel_parent / "anat_bias"
 
             # Se devo sovrascrivere, elimino completamente la cartella di output
             if OVERWRITE_EXISTING and out_dir.exists():
