@@ -255,14 +255,22 @@ def save_subject_mapping(mapping: list[tuple[int, str]], xlsx_path: Path):
         print(f"📑 openpyxl non disponibile, mappatura salvata in CSV: {csv_path}")
 
 # ===================== PROCESS ANAT =====================
-
 def process_anat_folder(src_anat_dir: Path, dst_anat_dir: Path):
     if not src_anat_dir.is_dir():
         print(f"   ❌ {src_anat_dir} non è una cartella, salto.")
         return
 
+    # PRIORITÀ INPUT:
+    # 1) anat/preproc_out    (output di Resampling.py)
+    # 2) anat/3dVOL
+    # 3) anat direttamente
+    preproc_dir = src_anat_dir / "preproc_out"
     vol_dir = src_anat_dir / "3dVOL"
-    if vol_dir.is_dir():
+
+    if preproc_dir.is_dir():
+        work_dir = preproc_dir
+        print(f"   📁 Uso la cartella preproc_out (input ricampionati): {work_dir}")
+    elif vol_dir.is_dir():
         work_dir = vol_dir
         print(f"   📁 Uso la cartella 3dVOL (input): {work_dir}")
     else:
@@ -342,6 +350,7 @@ def process_anat_folder(src_anat_dir: Path, dst_anat_dir: Path):
         if SAVE_TFM:
             write_tx(pd_tx, out_dir / f"{pd_p.stem}_to_T1.tfm")
 
+
 # ===================== MAIN =====================
 
 def main():
@@ -419,3 +428,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
